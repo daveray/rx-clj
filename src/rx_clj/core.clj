@@ -183,8 +183,7 @@
                   (chain xs
                          target
                          (fn [v]
-                           (if @first?
-                             (reset! first? false)
+                           (if-not (compare-and-set! first? true false)
                              (emit target sep))
                            (emit target v)))))))
 
