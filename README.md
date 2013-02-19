@@ -21,7 +21,7 @@ you write code like this:
 
 ```clojure
   (->> (rx/seq (slurp "words.txt"))
-       (rx/filter keepers)
+       (rx/filter #{:a :e :i :o :u})
        (rx/reduce (fn [m v] (update-in m [v] (fnil inc 0))) {}))
 ```
 
