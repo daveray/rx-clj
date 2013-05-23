@@ -13,7 +13,8 @@ For example, in RxJava, the signature of `Observable.map` is `[xs f]`, but in Cl
 
 ```clojure
   (-> (Observable/from (slurp "words.txt"))
-      (.filter (comp boolean #{:a :e :i :o :u}))
+      (.map #(Character/toLowerCase %))
+      (.filter (comp boolean #{\a \e \i \o \u}))
       (.reduce {} (fn [m v] (update-in m [v] (fnil inc 0)))))
 ```
 
@@ -21,13 +22,14 @@ you write code like this:
 
 ```clojure
   (->> (rx/seq (slurp "words.txt"))
-       (rx/filter #{:a :e :i :o :u})
+       (rx/map #(Character/toLowerCase %))
+       (rx/filter #{\a \e \i \o \u})
        (rx/reduce (fn [m v] (update-in m [v] (fnil inc 0))) {}))
 ```
 
-In either case, the result is an observable sequence.
+Note the idiomatic use of `->>`, a set as a filter, and order of args to `reduce`. In either case, the result is an observable sequence.
 
-See test/rx_clj/core_test.clj
+See `test/rx_clj/core_test.clj`
 
 ## Usage
 
