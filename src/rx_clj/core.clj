@@ -1,13 +1,16 @@
 (ns rx-clj.core
   (:refer-clojure :exclude [concat cons drop drop-while empty
                             filter first future
-                            interpose into keep keep-indexed last
+                            interpose into keep keep-indexed
                             map mapcat map-indexed
                             merge next partition reduce reductions
                             rest second seq some split-with
                             take take-while])
   (:import [rx Observable Observer Subscription]
-           [rx.util AtomicObservableSubscription]))
+           [rx.observables BlockingObservable]
+           [rx.subscriptions Subscriptions]))
+
+(set! *warn-on-reflection* true)
 
 (declare map map-indexed reduce take take-while zip)
 
@@ -53,14 +56,8 @@
         (error observer e)))))
 
 (defn on-error-return
-  [^Observer o f]
+  [^Observable o f]
   (.onErrorReturn o f))
-
-(defn ^Observable observable
-  "Create an observable from the given handler. When subscribed to, (handler observer)
-  is called at which point, handler can start emitting values, etc."
-  [handler]
-  (Observable/create handler))
 
 ;################################################################################
 
@@ -70,12 +67,7 @@
   ([^Observable o on-next-fn on-error-fn]
     (subscribe* o on-next-fn on-error-fn nil))
   ([^Observable o on-next-fn on-error-fn on-completed-fn]
-    (AtomicObservableSubscription. (.subscribe o on-next-fn on-error-fn on-completed-fn))))
-
-; I don't think this is necessary really.
-(defmacro subscribe
-  [o bindings & body]
-  `(subscribe* ~o (fn ~bindings ~@body)))
+    (.subscribe o on-next-fn on-error-fn on-completed-fn)))
 
 (defn unsubscribe
   "Unsubscribe from Subscription s and return it."
@@ -83,10 +75,10 @@
   (.unsubscribe s)
   s)
 
-(defn ^Subscription subscription
+(defn ^Subscription ->subscription
   "Create a new subscription that calls the given no-arg handler function"
   [handler]
-  (Observable/createSubscription handler))
+  (Subscriptions/create handler))
 
 (defn chain
   "Like subscribe*, but any omitted handlers pass-through to the observable next."
@@ -101,22 +93,32 @@
 
 ;################################################################################
 
-(defn seq
-  "Make an observable out of some seq-able thing. The rx equivalent of clojure.core/seq."
-  [xs]
-  (Observable/from xs))
+(defn fn->o
+  "Create an observable from the given handler. When subscribed to, (f observer)
+  is called at which point, handler can start emitting values, etc."
+  [f]
+  (Observable/create f))
 
 (defn ^Observable never [] (Observable/never))
 (defn ^Observable empty [] (Observable/empty))
 ; TODO call this return like in .net, or only?
 (defn ^Observable return [value] (Observable/just value))
 
+(defn seq->o
+  "Make an observable out of some seq-able thing. The rx equivalent of clojure.core/seq."
+  [xs]
+  (if xs
+    (Observable/from ^Iterable xs)
+    (empty)))
+
+;################################################################################
+
 (defn cons
   "cons x to the beginning of xs"
   [x xs]
-  (observable (fn [target]
-                (emit target x)
-                (chain xs target))))
+  (fn->o (fn [target]
+           (emit target x)
+           (chain xs target))))
 
 (defn ^Observable concat
   [& xs]
@@ -132,14 +134,14 @@
 (defn ^Observable drop-while
   [p xs]
   (let [p (predicate p)]
-    (observable (fn [target]
-                  (let [dropping (atom true)]
-                    (chain xs
-                           target
-                           (fn [v]
-                             (when (or (not @dropping)
-                                       (not (reset! dropping (p v))))
-                               (emit target v)))))))))
+    (fn->o (fn [target]
+             (let [dropping (atom true)]
+               (chain xs
+                      target
+                      (fn [v]
+                        (when (or (not @dropping)
+                                  (not (reset! dropping (p v))))
+                          (emit target v)))))))))
 
 (defn ^Observable filter
   [p ^Observable xs]
@@ -147,45 +149,16 @@
 
 (def first #(take 1 %))
 
-(defn future*
-  "Execute (f & args) in a separate thread and pass the result to onNext.
-  If an exception is thrown, onError is called with the exception.
-
-  Returns an Observable.
-  "
-  [f & args]
-  (observable (fn [observer]
-                (let [wrapped (-> #(emit % (apply f args))
-                                wrap-on-completed
-                                wrap-on-error)
-                      fu      (clojure.core/future (wrapped observer))]
-                  (subscription #(future-cancel fu))))))
-
-(defmacro future
-  "Executes body in a separate thread and passes the single result to onNext.
-  If an exception occurs, onError is called.
-
-  Returns an Observable
-
-  Examples:
-
-    (subscribe (rx/future (slurp \"input.txt\"))
-               (fn [v] (println \"Got: \" v)))
-    ; eventually outputs content of input.txt
-  "
-  [& body]
-  `(future* (fn [] ~@body)))
-
 (defn interpose
   [sep xs]
-  (observable (fn [target]
-                (let [first? (atom true)]
-                  (chain xs
-                         target
-                         (fn [v]
-                           (if-not (compare-and-set! first? true false)
-                             (emit target sep))
-                           (emit target v)))))))
+  (fn->o (fn [target]
+           (let [first? (atom true)]
+             (chain xs
+                    target
+                    (fn [v]
+                      (if-not (compare-and-set! first? true false)
+                        (emit target sep))
+                      (emit target v)))))))
 
 (defn into
   [to ^Observable from-observable]
@@ -205,10 +178,6 @@
   [f xs]
   (filter (complement nil?) (map-indexed f xs)))
 
-(defn ^Observable last
-  [^Observable o]
-  (.last o))
-
 (defn ^Observable map
   "Map a function over an observable sequence. Unlike clojure.core/map, only supports up
   to 4 simultaneous source sequences at the moment."
@@ -225,11 +194,11 @@
 
 (defn ^Observable map-indexed
   [f xs]
-  (observable (fn [target]
-                (let [n (atom -1)]
-                  (chain xs
-                         target
-                         (fn [v] (emit target (f (swap! n inc) v))))))))
+  (fn->o (fn [target]
+           (let [n (atom -1)]
+             (chain xs
+                    target
+                    (fn [v] (emit target (f (swap! n inc) v))))))))
 
 (defn merge
   "
@@ -268,13 +237,13 @@
     clojure.core/some
   "
   [p ^Observable xs]
-  (observable (fn [target]
-                (chain xs
-                       target
-                       (fn [v]
-                         (when-let [result (p v)]
-                           (emit target result)
-                           (done target)))))))
+  (fn->o (fn [target]
+           (chain xs
+                  target
+                  (fn [v]
+                    (when-let [result (p v)]
+                      (emit target result)
+                      (done target)))))))
 
 (defn split-with
   [p coll]
@@ -286,13 +255,13 @@
 
 (defn take-while
   [p xs]
-  (observable (fn [target]
-                (chain xs
-                       target
-                       (fn [v]
-                         (if (p v)
-                           (emit target v)
-                           (done target)))))))
+  (fn->o (fn [target]
+           (chain xs
+                  target
+                  (fn [v]
+                    (if (p v)
+                      (emit target v)
+                      (done target)))))))
 
 ;################################################################################;
 ; Operators that don't correspond directly to any Clojure seq fn
@@ -323,7 +292,15 @@
   "Observable.zip. You want map."
   ([f ^Observable a ^Observable b] (Observable/zip a b f))
   ([f ^Observable a ^Observable b ^Observable c] (Observable/zip a b c f))
-  ([f ^Observable a ^Observable b ^Observable c ^Observable d] (Observable/zip a b c d f)))
+  ([f ^Observable a ^Observable b ^Observable c ^Observable d] (Observable/zip a b c d f))
+  ([f a b c d & more]
+    ; recurse on more and then pull everything together with 4 parameter version
+   (zip (fn [a b c more-value]
+          (apply f a b c more-value))
+        a
+        b
+        c
+        (apply zip vector d more))))
 
 (defmacro zip-let
   [bindings & body]
@@ -335,7 +312,7 @@
 ;################################################################################;
 
 (defn generator*
-  "Creates an observable that call (f observable & args) which should emit a sequence.
+  "Creates an observable that calls (f observable & args) which should emit a sequence.
 
   Automatically calls on-completed on return, or on-error if any exception is thrown.
 
@@ -347,11 +324,11 @@
     (generator* emit 99)
   "
   [f & args]
-  (Observable/create (-> (fn [observer]
-                           (apply f observer args)
-                           (Observable/noOpSubscription))
-                       wrap-on-completed
-                       wrap-on-error)))
+  (fn->o (-> (fn [observer]
+               (apply f observer args)
+               (Subscriptions/empty))
+             wrap-on-completed
+             wrap-on-error)))
 
 (defmacro generator
   "Create an observable that executes body which should emit a sequence.
@@ -372,18 +349,20 @@
   `(generator* (fn ~bindings ~@body)))
 
 (defn future-generator*
-  "Same as generator* except f is invoked in a separate thread.
+  "DON'T USE THIS. THERE'S NO WAY TO CONTROL THE THREAD POOL USED BY THE FUTURE
+
+  Same as generator* except f is invoked in a separate thread.
 
   subscribe will not block.
   "
   [f & args]
-  (observable (fn [observer]
-                (let [wrapped (-> (fn [o]
-                                    (apply f o args))
-                                wrap-on-completed
-                                wrap-on-error)
-                      fu      (clojure.core/future (wrapped observer))]
-                  (subscription #(future-cancel fu))))))
+  (fn->o (fn [observer]
+           (let [wrapped (-> (fn [o]
+                               (apply f o args))
+                             wrap-on-completed
+                             wrap-on-error)
+                 fu      (clojure.core/future (wrapped observer))]
+             (->subscription #(future-cancel fu))))))
 
 (defmacro future-generator
   "Same as generator macro except body is invoked in a separate thread.
@@ -392,6 +371,39 @@
   "
   [bindings & body]
   `(future-generator* (fn ~bindings ~@body)))
+
+(defn future*
+  "DON'T USE THIS. THERE'S NO WAY TO CONTROL THE THREAD POOL USED BY THE FUTURE
+
+  Execute (f & args) in a separate thread and pass the result to onNext.
+  If an exception is thrown, onError is called with the exception.
+
+  Returns an Observable.
+  "
+  [f & args]
+  (fn->o (fn [observer]
+                (let [wrapped (-> #(emit % (apply f args))
+                                wrap-on-completed
+                                wrap-on-error)
+                      fu      (clojure.core/future (wrapped observer))]
+                  (->subscription #(future-cancel fu))))))
+
+(defmacro future
+  "DON'T USE THIS. THERE'S NO WAY TO CONTROL THE THREAD POOL USED BY THE FUTURE
+
+  Executes body in a separate thread and passes the single result to onNext.
+  If an exception occurs, onError is called.
+
+  Returns an Observable
+
+  Examples:
+
+    (subscribe (rx/future (slurp \"input.txt\"))
+               (fn [v] (println \"Got: \" v)))
+    ; eventually outputs content of input.txt
+  "
+  [& body]
+  `(future* (fn [] ~@body)))
 
 ;################################################################################;
 ; Helpers
@@ -410,17 +422,11 @@
         :value v
         :error (throw v)))))
 
-(defn -to
+(defn -into
   [to from-observable]
   (-first (into to from-observable)))
 
 
 ;################################################################################;
-
-
-
-
-
-
 
 
