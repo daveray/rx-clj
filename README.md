@@ -1,3 +1,5 @@
+# THESE BINDINDS HAVE BEEN SUBSUMED BY THE OFFICIAL RxClojure BINDINGS HERE: https://github.com/ReactiveX/RxClojure/
+
 # rx-clj
 
 Notional Clojure bindings for [RxJava](https://github.com/Netflix/RxJava). The main goal is to provide Rx versions of all the sequence operators in `clojure.core`, building on top of RxJava whenever possible. This will make it much more natural for a Clojure programmer to use RxJava when everything has the same "shape" as the Clojure functions they're familiar with. The biggies include:
